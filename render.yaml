@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: api-nit-bolivia
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"

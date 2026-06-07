@@ -18,6 +18,10 @@ interesante del proyecto (ver [¿Por qué dos versiones?](#por-qué-dos-versione
 | [`api_nit_bolivia.py`](api_nit_bolivia.py) | API REST | FastAPI + Playwright + Firefox | ✅ Sí |
 | [`consulta_nit_bolivia.py`](consulta_nit_bolivia.py) | Script CLI (versión inicial) | requests + BeautifulSoup | ❌ No (la SPA no responde a peticiones HTTP simples) |
 
+También incluye [`Dockerfile`](Dockerfile), [`railway.json`](railway.json) y
+[`render.yaml`](render.yaml) para desplegar la API gratis en Railway o
+Render (ver [🚀 Despliegue](#-despliegue-railway--render-capa-gratuita)).
+
 ---
 
 ## ✅ `consulta_nit_bolivia_playwright.py` (recomendado)
@@ -151,6 +155,69 @@ Respuestas de error:
 | `422` | El número de NIT no es válido (no son solo dígitos) | `{"detail": [...]}` (validación automática de FastAPI) |
 | `502` | El portal del SIN no respondió o falló la consulta | `{"detail": "ERROR: ..."}` |
 | `503` | El navegador interno todavía no terminó de iniciar | `{"detail": "El navegador interno aún no está listo"}` |
+
+### 🚀 Despliegue (Railway / Render, capa gratuita)
+
+El repositorio incluye todo lo necesario para desplegar `api_nit_bolivia.py`
+como contenedor Docker en **Railway** o **Render**, ambos con planes
+gratuitos:
+
+| Archivo | Para qué sirve |
+|---|---|
+| [`Dockerfile`](Dockerfile) | Imagen `python:3.12-slim` + Firefox de Playwright (`playwright install --with-deps firefox`) y arranque con `uvicorn`, escuchando en `$PORT` |
+| [`.dockerignore`](.dockerignore) | Evita copiar `.git`, cachés y archivos exportados a la imagen |
+| [`railway.json`](railway.json) | Configuración de Railway: build con Dockerfile y healthcheck en `/health` |
+| [`render.yaml`](render.yaml) | Blueprint de Render: servicio web Docker en el plan `free` con healthcheck en `/health` |
+
+#### Opción A — Railway
+
+1. Crea un proyecto nuevo en [railway.app](https://railway.app/) y elige
+   **Deploy from GitHub repo**, seleccionando `Scraping-NIT-BO`.
+2. Railway detecta el `Dockerfile` automáticamente (el `railway.json`
+   confirma el builder y define el healthcheck en `/health`).
+3. No hace falta configurar ninguna variable de entorno: Railway inyecta
+   `$PORT` y el `CMD` del Dockerfile ya lo usa.
+4. Al finalizar el build, Railway expone una URL pública tipo
+   `https://<tu-servicio>.up.railway.app` — prueba `/health` y
+   `/nit/555162024`.
+
+#### Opción B — Render
+
+1. En [render.com](https://render.com/) elige **New → Blueprint** y conecta
+   el repositorio `Scraping-NIT-BO` (Render leerá `render.yaml`
+   automáticamente), o bien **New → Web Service** seleccionando
+   *Environment: Docker* manualmente.
+2. Selecciona el plan **Free**. Render construye la imagen con el
+   `Dockerfile`, define `$PORT` automáticamente y usa `/health` como
+   healthcheck (ya configurado en `render.yaml`).
+3. Al terminar el deploy obtendrás una URL pública tipo
+   `https://api-nit-bolivia.onrender.com`.
+
+#### Notas importantes sobre el despliegue
+
+- **Memoria**: un navegador Firefox real consume bastante más RAM que una
+  API típica. Las capas gratuitas de Railway y Render rondan ~512 MB; si
+  el servicio se reinicia o falla el `/health` por falta de memoria,
+  considera subir de plan o limitar el navegador (por ejemplo, cerrando y
+  reabriendo el contexto entre consultas en lugar de mantenerlo siempre
+  activo).
+- **Arranque en frío (cold start)**: el plan gratuito de Render "duerme"
+  el servicio tras ~15 minutos sin tráfico; la primera petición tras
+  despertar puede tardar bastante porque, además de reactivar el
+  contenedor, la API debe levantar Firefox y completar el chequeo SSO de
+  Keycloak (~10 s). El `healthCheckPath: /health` ayuda a la plataforma a
+  esperar a que el navegador esté listo antes de enrutar tráfico.
+- **Build más lento la primera vez**: `playwright install --with-deps
+  firefox` descarga el navegador y sus dependencias del sistema durante el
+  build de la imagen, lo que puede tardar varios minutos en el primer
+  despliegue (las siguientes veces se reutiliza la capa cacheada si no
+  cambia `requirements.txt`).
+- **Probar la imagen localmente** (requiere Docker):
+  ```bash
+  docker build -t api-nit-bolivia .
+  docker run --rm -p 8000:8000 api-nit-bolivia
+  curl http://localhost:8000/health
+  ```
 
 ---
 
