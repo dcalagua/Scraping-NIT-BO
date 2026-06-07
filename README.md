@@ -6,15 +6,17 @@ Nacionales de Bolivia (SIAT):
 
 > https://siat.impuestos.gob.bo/rnc/public/consultas-estado-nit
 
-Este repositorio contiene **dos versiones** del scraper. Solo una de ellas
-funciona contra el portal actual — se conservan ambas porque la diferencia
-entre ellas es justamente la lección interesante del proyecto (ver
-[¿Por qué dos versiones?](#por-qué-dos-versiones)).
+El repositorio incluye un script de línea de comandos y una **API REST**
+construida sobre el mismo motor de consulta. También se conserva una
+primera versión del scraper que **no funciona** contra el portal actual —
+se incluye porque la diferencia entre ambas es justamente la lección
+interesante del proyecto (ver [¿Por qué dos versiones?](#por-qué-dos-versiones)).
 
-| Script | Tecnología | ¿Funciona hoy? |
-|---|---|---|
-| [`consulta_nit_bolivia_playwright.py`](consulta_nit_bolivia_playwright.py) | Playwright + Firefox | ✅ Sí |
-| [`consulta_nit_bolivia.py`](consulta_nit_bolivia.py) | requests + BeautifulSoup | ❌ No (la SPA no responde a peticiones HTTP simples) |
+| Archivo | Qué es | Tecnología | ¿Funciona hoy? |
+|---|---|---|---|
+| [`consulta_nit_bolivia_playwright.py`](consulta_nit_bolivia_playwright.py) | Script CLI | Playwright + Firefox | ✅ Sí |
+| [`api_nit_bolivia.py`](api_nit_bolivia.py) | API REST | FastAPI + Playwright + Firefox | ✅ Sí |
+| [`consulta_nit_bolivia.py`](consulta_nit_bolivia.py) | Script CLI (versión inicial) | requests + BeautifulSoup | ❌ No (la SPA no responde a peticiones HTTP simples) |
 
 ---
 
@@ -83,6 +85,75 @@ genera automáticamente un CSV con marca de tiempo
 
 ---
 
+## ✅ `api_nit_bolivia.py` — API REST con FastAPI
+
+Expone el mismo motor de consulta como una API HTTP con
+[FastAPI](https://fastapi.tiangolo.com/). Al iniciar, levanta **un único
+navegador Firefox** (vía Playwright) y lo deja autenticado contra el
+portal durante toda la vida del proceso — cargarlo toma ~10 s por el
+chequeo SSO de Keycloak. Cada solicitud reutiliza esa misma pestaña; las
+consultas se serializan con un lock porque el formulario no admite
+envíos en paralelo, y si una consulta falla (timeout, sesión vencida) la
+API recarga el portal una vez y reintenta automáticamente.
+
+### Instalación
+
+```bash
+pip install -r requirements.txt
+python -m playwright install firefox
+```
+
+### Ejecutar
+
+```bash
+uvicorn api_nit_bolivia:app --host 0.0.0.0 --port 8000
+```
+
+Documentación interactiva (Swagger UI) disponible en `http://localhost:8000/docs`.
+
+### Endpoints
+
+#### `GET /health`
+
+Verifica que la API y el navegador interno están operativos.
+
+```bash
+curl http://localhost:8000/health
+```
+```json
+{"status": "ok", "navegador_listo": true}
+```
+
+#### `GET /nit/{numero}`
+
+Devuelve los datos del contribuyente para el NIT indicado (solo dígitos).
+
+```bash
+curl http://localhost:8000/nit/555162024
+```
+```json
+{
+  "nit": "555162024",
+  "consultado_en": "2026-06-07 09:22:26",
+  "razon_social": "GRUPO EBIM LTDA.",
+  "estado": "ACTIVO",
+  "estado_actividad": "VIGENTE",
+  "tipo_contribuyente": "PERSONA JURÍDICA",
+  "regimen_contribuyente": "REGIMEN GENERAL"
+}
+```
+
+Respuestas de error:
+
+| Código | Caso | Ejemplo de cuerpo |
+|---|---|---|
+| `404` | NIT no encontrado en el RNC | `{"detail": "No se encontro informacion de contribuyente con Nit: 1"}` |
+| `422` | El número de NIT no es válido (no son solo dígitos) | `{"detail": [...]}` (validación automática de FastAPI) |
+| `502` | El portal del SIN no respondió o falló la consulta | `{"detail": "ERROR: ..."}` |
+| `503` | El navegador interno todavía no terminó de iniciar | `{"detail": "El navegador interno aún no está listo"}` |
+
+---
+
 ## ❌ `consulta_nit_bolivia.py`
 
 Versión inicial basada en `requests` + `BeautifulSoup`, pensada para un
@@ -134,6 +205,14 @@ recibe — el mismo dato que ve un usuario humano en pantalla.
 ## Requisitos
 
 - Python 3.10+
-- [Playwright](https://playwright.dev/python/) (`pip install playwright`)
-- Navegador Firefox de Playwright (`python -m playwright install firefox`)
-- `openpyxl` (opcional, solo para exportar a `.xlsx`)
+- [Playwright](https://playwright.dev/python/) y su navegador Firefox
+  (`python -m playwright install firefox`)
+- `openpyxl` — solo para exportar a `.xlsx` desde el script CLI
+- `fastapi` y `uvicorn[standard]` — solo para ejecutar `api_nit_bolivia.py`
+
+Instalación de todo lo anterior de una vez:
+
+```bash
+pip install -r requirements.txt
+python -m playwright install firefox
+```
