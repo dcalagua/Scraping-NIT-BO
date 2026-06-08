@@ -21,6 +21,7 @@ Requisitos:
 """
 
 import asyncio
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Path
@@ -35,29 +36,72 @@ estado_navegador = {"playwright": None, "browser": None, "context": None, "page"
 lock_consulta = asyncio.Lock()
 
 
-async def _cargar_portal():
-    """(Re)carga la página del portal y espera a que el formulario esté listo."""
-    page = estado_navegador["page"]
+RECURSOS_PESADOS = re.compile(
+    r"\.(png|jpe?g|gif|svg|webp|woff2?|ttf|otf|mp4|webm)(\?.*)?$", re.IGNORECASE
+)
+
+
+async def _bloquear_recursos_pesados(route):
+    await route.abort()
+
+
+async def _nuevo_navegador():
+    """Crea (o recrea) browser + contexto + página, y carga el portal.
+
+    Se usa tanto al arrancar como para recuperarse de un crash: en planes
+    gratuitos con poca RAM, Firefox puede morir a media consulta
+    ("Page crashed" / "Target page... has been closed"), y la única forma
+    de seguir sirviendo peticiones es descartar el navegador muerto y
+    levantar uno nuevo desde cero (reusar la página fallida solo produce
+    más errores en cascada).
+    """
+    pw = estado_navegador["playwright"]
+    for clave in ("context", "browser"):
+        objeto = estado_navegador.get(clave)
+        if objeto is not None:
+            try:
+                await objeto.close()
+            except Exception:
+                pass
+
+    # Firefox: en Chrome/Chromium el chequeo SSO de Keycloak nunca responde
+    # y la SPA termina redirigiendo fuera de la página de consulta.
+    browser = await pw.firefox.launch(
+        headless=True,
+        firefox_user_prefs={
+            "browser.cache.disk.enable": False,
+            "browser.cache.memory.enable": False,
+            "browser.sessionhistory.max_total_viewers": 0,
+            "media.autoplay.default": 5,
+        },
+    )
+    context = await browser.new_context(locale="es-BO")
+    page = await context.new_page()
+    # Bloquear imágenes/fuentes/video reduce bastante el consumo de RAM de
+    # Firefox; el formulario se ubica por selector/texto, no por apariencia.
+    await page.route(RECURSOS_PESADOS, _bloquear_recursos_pesados)
+    estado_navegador.update(browser=browser, context=context, page=page)
+
     await page.goto(URL, timeout=60_000)
     await page.wait_for_selector("input[id^='mat-input']", timeout=60_000)
     await page.wait_for_timeout(1000)
+    return page
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     pw = await async_playwright().start()
-    # Firefox: en Chrome/Chromium el chequeo SSO de Keycloak nunca responde
-    # y la SPA termina redirigiendo fuera de la página de consulta.
-    browser = await pw.firefox.launch(headless=True)
-    context = await browser.new_context(locale="es-BO")
-    page = await context.new_page()
-    estado_navegador.update(playwright=pw, browser=browser, context=context, page=page)
-
-    await _cargar_portal()
+    estado_navegador["playwright"] = pw
+    await _nuevo_navegador()
     yield
 
-    await context.close()
-    await browser.close()
+    for clave in ("context", "browser"):
+        objeto = estado_navegador.get(clave)
+        if objeto is not None:
+            try:
+                await objeto.close()
+            except Exception:
+                pass
     await pw.stop()
     estado_navegador.update(playwright=None, browser=None, context=None, page=None)
 
@@ -109,18 +153,26 @@ async def health():
 async def obtener_nit(
     numero: str = Path(..., pattern=r"^\d+$", description="Número de NIT a consultar (solo dígitos)")
 ):
-    page = estado_navegador["page"]
-    if page is None:
+    if estado_navegador["page"] is None:
         raise HTTPException(status_code=503, detail="El navegador interno aún no está listo")
 
     async with lock_consulta:
-        resultado = await consultar_nit(page, numero)
-
-        # Si algo salió mal (timeout, redirección, sesión vencida) se
-        # recarga el portal una sola vez y se reintenta antes de fallar.
-        if resultado.get("estado", "").startswith("ERROR"):
-            await _cargar_portal()
-            resultado = await consultar_nit(page, numero)
+        try:
+            resultado = await consultar_nit(estado_navegador["page"], numero)
+            if resultado.get("estado", "").startswith("ERROR"):
+                raise RuntimeError(resultado["estado"])
+        except Exception:
+            # El navegador pudo haberse caído (crash por memoria, sesión
+            # vencida, "Target page... has been closed", etc.): se relanza
+            # desde cero y se reintenta la consulta una sola vez.
+            try:
+                page = await _nuevo_navegador()
+                resultado = await consultar_nit(page, numero)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"ERROR: no se pudo recuperar el navegador interno ({e})",
+                )
 
     if "razon_social" in resultado:
         return Contribuyente(**resultado)
